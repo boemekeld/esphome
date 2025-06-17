@@ -240,7 +240,7 @@ void PN532::loop() {
 
   this->read_mode();
 
-  this->turn_off_rf_();
+  //this->turn_off_rf_();
 }
 
 bool PN532::write_command_(const std::vector<uint8_t> &data) {
