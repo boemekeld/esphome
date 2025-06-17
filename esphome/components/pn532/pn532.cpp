@@ -326,7 +326,7 @@ enum PN532ReadReady PN532::read_ready_(bool block) {
       break;
     }
 
-    if (millis() - this->rd_start_time_ > 200) {
+    if (millis() - this->rd_start_time_ > 300) {
       ESP_LOGV(TAG, "Timed out waiting for readiness from PN532!");
       this->rd_ready_ = TIMEOUT;
       break;
