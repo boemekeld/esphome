@@ -37,37 +37,37 @@ std::unique_ptr<nfc::NfcTag> PN532::read_type4_tag_(std::vector<uint8_t> &uid) {
   ESP_LOGD(TAG_TYPE4, "Reading Type 4 tag UID %s", nfc::format_uid(uid).c_str());
   std::vector<uint8_t> response;
 
-  // 1) Select NDEF Application AID
+  // 1) Select NDEF Application AID D2760000850101
   static constexpr uint8_t NDEF_AID[] = {0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01};
-  std::vector<uint8_t> apdu = {0x00,0xA4,0x04,0x00, sizeof(NDEF_AID)};
+  std::vector<uint8_t> apdu = {0x00, 0xA4, 0x04, 0x00, sizeof(NDEF_AID)};
   apdu.insert(apdu.end(), NDEF_AID, NDEF_AID + sizeof(NDEF_AID));
   apdu.push_back(0x00);
   if (!this->send_apdu_(apdu, response))
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
 
-  // 2) Select CC file (E1 03)
-  apdu = {0x00,0xA4,0x00,0x0C,0x02,0xE1,0x03};
+  // 2) Select CC File (E1 03)
+  apdu = {0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x03};
   if (!this->send_apdu_(apdu, response))
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
 
-  // 3) Read CC file
-  apdu = {0x00,0xB0,0x00,0x00,0x00};
+  // 3) Read CC File
+  apdu = {0x00, 0xB0, 0x00, 0x00, 0x00};
   if (!this->send_apdu_(apdu, response) || response.size() < 7)
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
 
-  // Parse CC at offset 3: [0]=mapVer, [1-2]=MLe, [3]=0x04, [4]=len, [5-6]=FileID, [7-8]=MaxLe...
+  // Parse CC TLV at offset 3:
   size_t idx = 3;
   if (response[idx] != 0x04 || response.size() < idx + 6) {
     ESP_LOGW(TAG_TYPE4, "Bad CC TLV");
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
   }
   uint8_t file_hi = response[idx + 2], file_lo = response[idx + 3];
   uint16_t ndef_max = (response[idx + 4] << 8) | response[idx + 5];
 
-  // 4) Select NDEF file (E1 04 or as read above)
-  apdu = {0x00,0xA4,0x00,0x0C,0x02, file_hi, file_lo};
+  // 4) Select NDEF File (E1 04)
+  apdu = {0x00, 0xA4, 0x00, 0x0C, 0x02, file_hi, file_lo};
   if (!this->send_apdu_(apdu, response))
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
 
   // 5) Read full NDEF file in chunks
   std::vector<uint8_t> full_data;
@@ -75,18 +75,18 @@ std::unique_ptr<nfc::NfcTag> PN532::read_type4_tag_(std::vector<uint8_t> &uid) {
   while (offset < ndef_max) {
     uint8_t p1 = offset >> 8, p2 = offset & 0xFF;
     uint8_t le = std::min<uint16_t>(ndef_max - offset, 0xFF);
-    apdu = {0x00,0xB0,p1,p2,le};
+    apdu = {0x00, 0xB0, p1, p2, le};
     if (!this->send_apdu_(apdu, response)) break;
     full_data.insert(full_data.end(), response.begin(), response.end());
     offset += response.size();
     if (response.size() < le) break;
   }
 
-  // 6) Extract NDEF TLV and payload (short vs. long)
+  // 6) Extract NDEF TLV (0x03) and payload (short vs long)
   auto it = std::find(full_data.begin(), full_data.end(), 0x03);
   if (it == full_data.end()) {
     ESP_LOGW(TAG_TYPE4, "No NDEF TLV found");
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
   }
   size_t base = it - full_data.begin();
   uint32_t length;
@@ -100,10 +100,10 @@ std::unique_ptr<nfc::NfcTag> PN532::read_type4_tag_(std::vector<uint8_t> &uid) {
   }
   if (start + length > full_data.size()) {
     ESP_LOGW(TAG_TYPE4, "NDEF data truncated");
-    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
   }
   std::vector<uint8_t> ndef_bytes(full_data.begin() + start, full_data.begin() + start + length);
-  return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4, ndef_bytes);
+  return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4, ndef_bytes);
 }
 
 bool PN532::write_type4_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message) {
@@ -117,7 +117,7 @@ bool PN532::write_type4_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *messag
   apdu.push_back(0x00);
   if (!this->send_apdu_(apdu, response)) return false;
 
-  // b) Select NDEF File
+  // b) Select NDEF File (E1 04)
   apdu = {0x00,0xA4,0x00,0x0C,0x02,0xE1,0x04};
   if (!this->send_apdu_(apdu, response)) return false;
 
