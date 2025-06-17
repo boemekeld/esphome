@@ -360,6 +360,8 @@ void PN532::turn_off_rf_() {
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
   uint8_t type = nfc::guess_tag_type(uid.size());
 
+  return make_unique<nfc::NfcTag>(uid);
+
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
     ESP_LOGD(TAG, "Mifare classic");
     return this->read_mifare_classic_tag_(uid);
