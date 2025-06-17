@@ -192,7 +192,17 @@ void PN532::loop() {
   this->current_uid_ = nfcid;
 
   if (next_task_ == READ) {
-    auto tag = this->read_tag_(nfcid);
+
+    std::unique_ptr<nfc::NfcTag> tag;
+    // Bit 6 of SAK indicates ISO-DEP (14443-4) support
+    uint8_t sak = read.size() > 4 ? read[4] : 0;
+    if (sak & 0x20) {
+      ESP_LOGD(TAG, "ISO-DEP / Type 4 tag detected");
+      tag = this->read_iso_dep_tag_(read, nfcid);
+    } else {
+      tag = this->read_tag_(nfcid);
+    }
+
     for (auto *trigger : this->triggers_ontag_)
       trigger->process(tag);
 

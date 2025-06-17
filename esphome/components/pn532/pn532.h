@@ -69,6 +69,9 @@ class PN532 : public PollingComponent {
   virtual bool read_data(std::vector<uint8_t> &data, uint8_t len) = 0;
   virtual bool read_response(uint8_t command, std::vector<uint8_t> &data) = 0;
 
+  bool exchange_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);
+  std::unique_ptr<nfc::NfcTag> read_iso_dep_tag_(const std::vector<uint8_t> &inlist_response, const std::vector<uint8_t> &uid);
+
   std::unique_ptr<nfc::NfcTag> read_tag_(std::vector<uint8_t> &uid);
 
   bool format_tag_(std::vector<uint8_t> &uid);
