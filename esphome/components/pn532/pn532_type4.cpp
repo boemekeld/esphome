@@ -1,6 +1,9 @@
+#include <algorithm>
+#include <vector>
+#include <memory>
+
 #include "pn532.h"
 #include "esphome/core/log.h"
-#include <algorithm>
 
 namespace esphome {
 namespace pn532 {
@@ -8,111 +11,149 @@ namespace pn532 {
 static const char *const TAG_TYPE4 = "pn532.type4";
 static const char *const NFC_FORUM_TYPE_4 = "NFC Forum Type 4";
 
-// Helper: wrap INDATAEXCHANGE + check SW1/SW2 = 0x90/0x00
-bool PN532::exchange_apdu_(const std::vector<uint8_t> &apdu,
-                           std::vector<uint8_t> &response) {
-  // [D4][40] = INDATAEXCHANGE, [01] = target #1, [00] = ISO-DEP framing
-  std::vector<uint8_t> cmd = {PN532_COMMAND_INDATAEXCHANGE, 0x01, 0x00};
-  cmd.insert(cmd.end(), apdu.begin(), apdu.end());
-  if (!this->write_command_(cmd)) {
-    ESP_LOGE(TAG_TYPE4, "Failed to send APDU");
+// Member implementation of send_apdu_
+bool PN532::send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response) {
+  // Wrap in InDataExchange
+  std::vector<uint8_t> data = {PN532_COMMAND_INDATAEXCHANGE, 0x01};
+  data.insert(data.end(), apdu.begin(), apdu.end());
+
+  if (!this->write_command_(data) ||
+      !this->read_response(PN532_COMMAND_INDATAEXCHANGE, response) ||
+      response.size() < 2) {
     return false;
   }
-  std::vector<uint8_t> data;
-  if (!this->read_response(PN532_COMMAND_INDATAEXCHANGE, data) ||
-      data.size() < 3 || data[0] != 0x00) {
-    ESP_LOGE(TAG_TYPE4, "No resp or status byte != 0");
-    return false;
-  }
-  // Last two bytes are SW1 SW2
-  uint8_t sw1 = data[data.size() - 2], sw2 = data.back();
+  // Check SW1SW2 == 0x90 0x00
+  size_t len = response.size();
+  uint8_t sw1 = response[len - 2], sw2 = response[len - 1];
   if (sw1 != 0x90 || sw2 != 0x00) {
-    ESP_LOGE(TAG_TYPE4, "APDU error SW1/2=%02X %02X", sw1, sw2);
+    ESP_LOGW(TAG_TYPE4, "APDU error SW1SW2=%02X%02X", sw1, sw2);
     return false;
   }
-  // Strip status byte + SW1/SW2, return only payload
-  response.assign(data.begin() + 1, data.end() - 2);
+  response.resize(len - 2);  // strip status bytes
   return true;
 }
 
-// Main Type 4 read sequence
-std::unique_ptr<nfc::NfcTag> PN532::read_iso_dep_tag_(
-    const std::vector<uint8_t> &inlist, const std::vector<uint8_t> &uid) {
-  std::vector<uint8_t> apdu, resp;
+std::unique_ptr<nfc::NfcTag> PN532::read_type4_tag_(std::vector<uint8_t> &uid) {
+  ESP_LOGD(TAG_TYPE4, "Reading Type 4 tag UID %s", nfc::format_uid(uid).c_str());
+  std::vector<uint8_t> response;
 
-  // 1) Select NDEF application AID D2760000850101
-  apdu = {0x00, 0xA4, 0x04, 0x00, 0x07,
-          0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00};
-  if (!this->exchange_apdu_(apdu, resp)) {
-    ESP_LOGE(TAG_TYPE4, "Select NDEF AID failed");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+  // 1) Select NDEF Application AID
+  static constexpr uint8_t NDEF_AID[] = {0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01};
+  std::vector<uint8_t> apdu = {0x00,0xA4,0x04,0x00, sizeof(NDEF_AID)};
+  apdu.insert(apdu.end(), NDEF_AID, NDEF_AID + sizeof(NDEF_AID));
+  apdu.push_back(0x00);
+  if (!this->send_apdu_(apdu, response))
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+
+  // 2) Select CC file (E1 03)
+  apdu = {0x00,0xA4,0x00,0x0C,0x02,0xE1,0x03};
+  if (!this->send_apdu_(apdu, response))
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+
+  // 3) Read CC file
+  apdu = {0x00,0xB0,0x00,0x00,0x00};
+  if (!this->send_apdu_(apdu, response) || response.size() < 7)
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+
+  // Parse CC at offset 3: [0]=mapVer, [1-2]=MLe, [3]=0x04, [4]=len, [5-6]=FileID, [7-8]=MaxLe...
+  size_t idx = 3;
+  if (response[idx] != 0x04 || response.size() < idx + 6) {
+    ESP_LOGW(TAG_TYPE4, "Bad CC TLV");
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+  }
+  uint8_t file_hi = response[idx + 2], file_lo = response[idx + 3];
+  uint16_t ndef_max = (response[idx + 4] << 8) | response[idx + 5];
+
+  // 4) Select NDEF file (E1 04 or as read above)
+  apdu = {0x00,0xA4,0x00,0x0C,0x02, file_hi, file_lo};
+  if (!this->send_apdu_(apdu, response))
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+
+  // 5) Read full NDEF file in chunks
+  std::vector<uint8_t> full_data;
+  uint16_t offset = 0;
+  while (offset < ndef_max) {
+    uint8_t p1 = offset >> 8, p2 = offset & 0xFF;
+    uint8_t le = std::min<uint16_t>(ndef_max - offset, 0xFF);
+    apdu = {0x00,0xB0,p1,p2,le};
+    if (!this->send_apdu_(apdu, response)) break;
+    full_data.insert(full_data.end(), response.begin(), response.end());
+    offset += response.size();
+    if (response.size() < le) break;
   }
 
-  // 2) Select CC file (ID = E1 03)
-  apdu = {0x00, 0xA4, 0x00, 0x0C, 0x02, 0xE1, 0x03, 0x00};
-  if (!this->exchange_apdu_(apdu, resp)) {
-    ESP_LOGE(TAG_TYPE4, "Select CC file failed");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+  // 6) Extract NDEF TLV and payload (short vs. long)
+  auto it = std::find(full_data.begin(), full_data.end(), 0x03);
+  if (it == full_data.end()) {
+    ESP_LOGW(TAG_TYPE4, "No NDEF TLV found");
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
   }
-
-  // 3) Read first 15 bytes of CC
-  apdu = {0x00, 0xB0, 0x00, 0x00, 0x0F};
-  if (!this->exchange_apdu_(apdu, resp) || resp.size() < 4) {
-    ESP_LOGE(TAG_TYPE4, "Read CC file failed");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+  size_t base = it - full_data.begin();
+  uint32_t length;
+  size_t start;
+  if (full_data[base + 1] != 0xFF) {
+    length = full_data[base + 1];
+    start = base + 2;
+  } else {
+    length = ((uint32_t)full_data[base + 2] << 8) | full_data[base + 3];
+    start = base + 4;
   }
+  if (start + length > full_data.size()) {
+    ESP_LOGW(TAG_TYPE4, "NDEF data truncated");
+    return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+  }
+  std::vector<uint8_t> ndef_bytes(full_data.begin() + start, full_data.begin() + start + length);
+  return std::make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4, ndef_bytes);
+}
 
-  // Parse TLV in CC to find NDEF File Control (tag=0x04)
-  uint16_t ndef_file_id = 0, ndef_max_len = 0;
-  size_t idx = 2;  // skip CCLEN + version
-  while (idx + 3 < resp.size()) {
-    uint8_t t = resp[idx], l = resp[idx + 1];
-    if (t == 0x04 && l >= 4) {
-      ndef_file_id  = (resp[idx + 2] << 8) | resp[idx + 3];
-      ndef_max_len  = (resp[idx + 4] << 8) | resp[idx + 5];
-      break;
+bool PN532::write_type4_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message) {
+  ESP_LOGD(TAG_TYPE4, "Writing Type 4 tag UID %s", nfc::format_uid(uid).c_str());
+  std::vector<uint8_t> response;
+
+  // a) Select NDEF Application
+  static constexpr uint8_t NDEF_AID[] = {0xD2,0x76,0x00,0x00,0x85,0x01,0x01};
+  std::vector<uint8_t> apdu = {0x00,0xA4,0x04,0x00,sizeof(NDEF_AID)};
+  apdu.insert(apdu.end(), NDEF_AID, NDEF_AID + sizeof(NDEF_AID));
+  apdu.push_back(0x00);
+  if (!this->send_apdu_(apdu, response)) return false;
+
+  // b) Select NDEF File
+  apdu = {0x00,0xA4,0x00,0x0C,0x02,0xE1,0x04};
+  if (!this->send_apdu_(apdu, response)) return false;
+
+  // c) Wrap NDEF payload in TLV
+  auto body = message->encode();
+  std::vector<uint8_t> tlv;
+  tlv.push_back(0x03);
+  if (body.size() < 0xFF) {
+    tlv.push_back(body.size());
+  } else {
+    tlv.push_back(0xFF);
+    tlv.push_back((body.size() >> 8) & 0xFF);
+    tlv.push_back(body.size() & 0xFF);
+  }
+  tlv.insert(tlv.end(), body.begin(), body.end());
+  tlv.push_back(0xFE);
+
+  // d) UPDATE BINARY in 255-byte chunks
+  size_t off = 0;
+  while (off < tlv.size()) {
+    uint8_t p1 = off >> 8, p2 = off & 0xFF;
+    uint8_t lc = std::min<size_t>(tlv.size() - off, 0xFF);
+    apdu = {0x00,0xD6,p1,p2,lc};
+    apdu.insert(apdu.end(), tlv.begin() + off, tlv.begin() + off + lc);
+    if (!this->send_apdu_(apdu, response)) {
+      ESP_LOGE(TAG_TYPE4, "Failed UPDATE BINARY at offset %u", off);
+      return false;
     }
-    idx += 2 + l;
+    off += lc;
   }
-  if (!ndef_file_id) {
-    ESP_LOGE(TAG_TYPE4, "No NDEF file control TLV");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
-  }
+  return true;
+}
 
-  // 4) Select the NDEF file
-  apdu = {0x00, 0xA4, 0x00, 0x0C, 0x02,
-          uint8_t(ndef_file_id >> 8), uint8_t(ndef_file_id & 0xFF), 0x00};
-  if (!this->exchange_apdu_(apdu, resp)) {
-    ESP_LOGE(TAG_TYPE4, "Select NDEF file failed");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
-  }
-
-  // 5) Read NLEN (2-byte length)
-  apdu = {0x00, 0xB0, 0x00, 0x00, 0x02};
-  if (!this->exchange_apdu_(apdu, resp) || resp.size() < 2) {
-    ESP_LOGE(TAG_TYPE4, "Read NDEF length failed");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
-  }
-  uint16_t ndef_len = (resp[0] << 8) | resp[1];
-  if (!ndef_len)
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
-
-  // 6) Read the NDEF message in chunks up to 0xFF bytes
-  std::vector<uint8_t> ndef_data;
-  size_t offset = 2;
-  while (ndef_data.size() < ndef_len) {
-    uint8_t chunk = uint8_t(std::min<size_t>(ndef_len - ndef_data.size(), 0xFF));
-    uint8_t p1 = (offset >> 8) & 0xFF, p2 = offset & 0xFF;
-    apdu = {0x00, 0xB0, p1, p2, chunk};
-    if (!this->exchange_apdu_(apdu, resp)) {
-      ESP_LOGE(TAG_TYPE4, "Read NDEF data failed @%u", offset);
-      break;
-    }
-    ndef_data.insert(ndef_data.end(), resp.begin(), resp.begin() + chunk);
-    offset += chunk;
-  }
-
-  return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4, ndef_data);
+bool PN532::format_type4_tag_(std::vector<uint8_t> &/*uid*/) {
+  ESP_LOGD(TAG_TYPE4, "Type 4 tags are preformatted—no action needed");
+  return true;
 }
 
 }  // namespace pn532

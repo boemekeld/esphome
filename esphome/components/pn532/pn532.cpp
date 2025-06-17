@@ -169,6 +169,12 @@ void PN532::loop() {
 
   uint8_t nfcid_length = read[5];
   std::vector<uint8_t> nfcid(read.begin() + 6, read.begin() + 6 + nfcid_length);
+
+  // --- NEW: detect ISO-DEP / Type 4 support via SAK bit 6 (0x20) ---
+  uint8_t sak = read[4];
+  this->last_tag_iso_dep_ = (sak & 0x20) != 0;
+  ESP_LOGD(TAG, "SAK=0x%02X → ISO-DEP %s", sak, YESNO(this->last_tag_iso_dep_));
+
   if (read.size() < 6U + nfcid_length) {
     // oops, pn532 returned invalid data
     return;
@@ -192,17 +198,7 @@ void PN532::loop() {
   this->current_uid_ = nfcid;
 
   if (next_task_ == READ) {
-
-    std::unique_ptr<nfc::NfcTag> tag;
-    // Bit 6 of SAK indicates ISO-DEP (14443-4) support
-    uint8_t sak = read.size() > 4 ? read[4] : 0;
-    if (sak & 0x20) {
-      ESP_LOGD(TAG, "ISO-DEP / Type 4 tag detected");
-      tag = this->read_iso_dep_tag_(read, nfcid);
-    } else {
-      tag = this->read_tag_(nfcid);
-    }
-
+    auto tag = this->read_tag_(nfcid);
     for (auto *trigger : this->triggers_ontag_)
       trigger->process(tag);
 
@@ -368,6 +364,10 @@ void PN532::turn_off_rf_() {
 }
 
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
+  if (this->last_tag_iso_dep_) {
+    ESP_LOGD(TAG, "Dispatching to Type 4 reader");
+    return this->read_type4_tag_(uid);
+  }
   uint8_t type = nfc::guess_tag_type(uid.size());
 
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
@@ -414,6 +414,10 @@ bool PN532::clean_tag_(std::vector<uint8_t> &uid) {
 }
 
 bool PN532::format_tag_(std::vector<uint8_t> &uid) {
+  if (this->last_tag_iso_dep_) {
+    ESP_LOGD(TAG, "Formatting Type 4 tag (no-op)");
+    return this->format_type4_tag_(uid);
+  }
   uint8_t type = nfc::guess_tag_type(uid.size());
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
     return this->format_mifare_classic_ndef_(uid);
@@ -425,6 +429,10 @@ bool PN532::format_tag_(std::vector<uint8_t> &uid) {
 }
 
 bool PN532::write_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message) {
+  if (this->last_tag_iso_dep_) {
+    ESP_LOGD(TAG, "Writing Type 4 NDEF");
+    return this->write_type4_tag_(uid, message);
+  }
   uint8_t type = nfc::guess_tag_type(uid.size());
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
     return this->write_mifare_classic_tag_(uid, message);
