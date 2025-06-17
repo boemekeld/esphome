@@ -56,13 +56,15 @@ class PN532 : public PollingComponent {
   void write_mode(nfc::NdefMessage *message);
   bool powerdown();
 
+  bool send_apdu(const std::vector<uint8_t> &command, std::vector<uint8_t> &response);
+  const std::vector<uint8_t> &get_last_response() const;
+
  protected:
   void turn_off_rf_();
   bool write_command_(const std::vector<uint8_t> &data);
   bool read_ack_();
   void send_ack_();
   void send_nack_();
-  bool send_apdu_(const std::vector<uint8_t> &apdu, std::vector<uint8_t> &response);
 
   enum PN532ReadReady read_ready_(bool block);
   virtual bool is_read_ready() = 0;
@@ -85,13 +87,6 @@ class PN532 : public PollingComponent {
   bool write_mifare_classic_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message);
 
   std::unique_ptr<nfc::NfcTag> read_mifare_ultralight_tag_(std::vector<uint8_t> &uid);
-
-  // ISO-DEP / Type 4 support
-  std::unique_ptr<nfc::NfcTag> read_type4_tag_(std::vector<uint8_t> &uid);
-  bool write_type4_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message);
-  bool format_type4_tag_(std::vector<uint8_t> &uid);
-  bool last_tag_iso_dep_{false};
-
   bool read_mifare_ultralight_bytes_(uint8_t start_page, uint16_t num_bytes, std::vector<uint8_t> &data);
   bool is_mifare_ultralight_formatted_(const std::vector<uint8_t> &page_3_to_6);
   uint16_t read_mifare_ultralight_capacity_();
@@ -122,6 +117,7 @@ class PN532 : public PollingComponent {
     SAM_COMMAND_FAILED,
   } error_code_{NONE};
   CallbackManager<void()> on_finished_write_callback_;
+  std::vector<uint8_t> last_response_;
 };
 
 class PN532BinarySensor : public binary_sensor::BinarySensor {

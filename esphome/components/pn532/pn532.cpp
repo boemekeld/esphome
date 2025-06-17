@@ -169,12 +169,6 @@ void PN532::loop() {
 
   uint8_t nfcid_length = read[5];
   std::vector<uint8_t> nfcid(read.begin() + 6, read.begin() + 6 + nfcid_length);
-
-  // --- NEW: detect ISO-DEP / Type 4 support via SAK bit 6 (0x20) ---
-  uint8_t sak = read[4];
-  this->last_tag_iso_dep_ = (sak & 0x20) != 0;
-  ESP_LOGD(TAG, "SAK=0x%02X → ISO-DEP %s", sak, YESNO(this->last_tag_iso_dep_));
-
   if (read.size() < 6U + nfcid_length) {
     // oops, pn532 returned invalid data
     return;
@@ -364,10 +358,6 @@ void PN532::turn_off_rf_() {
 }
 
 std::unique_ptr<nfc::NfcTag> PN532::read_tag_(std::vector<uint8_t> &uid) {
-  if (this->last_tag_iso_dep_) {
-    ESP_LOGD(TAG, "Dispatching to Type 4 reader");
-    return this->read_type4_tag_(uid);
-  }
   uint8_t type = nfc::guess_tag_type(uid.size());
 
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
@@ -414,10 +404,6 @@ bool PN532::clean_tag_(std::vector<uint8_t> &uid) {
 }
 
 bool PN532::format_tag_(std::vector<uint8_t> &uid) {
-  if (this->last_tag_iso_dep_) {
-    ESP_LOGD(TAG, "Formatting Type 4 tag (no-op)");
-    return this->format_type4_tag_(uid);
-  }
   uint8_t type = nfc::guess_tag_type(uid.size());
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
     return this->format_mifare_classic_ndef_(uid);
@@ -429,10 +415,6 @@ bool PN532::format_tag_(std::vector<uint8_t> &uid) {
 }
 
 bool PN532::write_tag_(std::vector<uint8_t> &uid, nfc::NdefMessage *message) {
-  if (this->last_tag_iso_dep_) {
-    ESP_LOGD(TAG, "Writing Type 4 NDEF");
-    return this->write_type4_tag_(uid, message);
-  }
   uint8_t type = nfc::guess_tag_type(uid.size());
   if (type == nfc::TAG_TYPE_MIFARE_CLASSIC) {
     return this->write_mifare_classic_tag_(uid, message);
@@ -477,6 +459,32 @@ bool PN532BinarySensor::process(std::vector<uint8_t> &data) {
   this->publish_state(true);
   this->found_ = true;
   return true;
+}
+
+bool PN532::send_apdu(const std::vector<uint8_t> &command, std::vector<uint8_t> &response) {
+  // Build the InDataExchange packet: [CMD_INDATAEXCHANGE, target=0x01, <APDU bytes>]
+  std::vector<uint8_t> packet;
+  packet.push_back(PN532_COMMAND_INDATAEXCHANGE);  // 0x40 – InDataExchange command
+  packet.push_back(0x01);  // Target (1 = first card)
+  packet.insert(packet.end(), command.begin(), command.end());
+
+  // Send command packet to PN532
+  if (!this->write_command_(packet)) {
+    ESP_LOGE(TAG, "PN532: Error sending APDU command");
+    return false;
+  }
+  // Read the response (response[0] is status flag, following bytes are APDU response)
+  if (!this->read_response(PN532_COMMAND_INDATAEXCHANGE, response)) {
+    ESP_LOGE(TAG, "PN532: Error reading APDU response");
+    return false;
+  }
+  // Save the raw response bytes for later access
+  this->last_response_ = response;
+  return true;
+}
+
+const std::vector<uint8_t> &PN532::get_last_response() const {
+  return this->last_response_;
 }
 
 }  // namespace pn532
