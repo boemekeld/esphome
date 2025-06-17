@@ -59,8 +59,8 @@ std::unique_ptr<nfc::NfcTag> PN532::read_type4_tag_(std::vector<uint8_t> &uid) {
   constexpr size_t CC_TLV_OFFSET = 2 + 1 + 2 + 2;  // ==7
   size_t idx = CC_TLV_OFFSET;
   if (response[idx] != 0x04 || response.size() < idx + 6) {
-    ESP_LOGW(TAG_TYPE4, "Bad CC TLV");
-    return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
+    ESP_LOGW(TAG_TYPE4, "Bad CC TLV (ignored)");
+    //return make_unique<nfc::NfcTag>(uid, NFC_FORUM_TYPE_4);
   }
   uint8_t file_hi = response[idx + 2], file_lo = response[idx + 3];
   uint16_t ndef_max = (response[idx + 4] << 8) | response[idx + 5];
