@@ -17,8 +17,8 @@ std::unique_ptr<nfc::NfcTag> PN532::read_mifare_ultralight_tag_(std::vector<uint
   }
 
   if (!this->is_mifare_ultralight_formatted_(data)) {
-    ESP_LOGW(TAG, "Not NDEF formatted");
-    return make_unique<nfc::NfcTag>(uid, nfc::NFC_FORUM_TYPE_2);
+    ESP_LOGW(TAG, "Not NDEF formatted (ignored)");
+    //return make_unique<nfc::NfcTag>(uid, nfc::NFC_FORUM_TYPE_2);
   }
 
   uint8_t message_length;
